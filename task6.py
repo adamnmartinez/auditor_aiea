@@ -18,9 +18,10 @@ stride = 2
 # Hyperparameters
 action_std = 0.1 # Standard deviation for action Normal distribution
 epsilon = 0.2 # How much should policy be allowed to change?
-gamma = 0.99 # Discount factor for return calculation
+gamma = 0.8 # Discount factor for return calculation
 epochs = 4
-num_episodes = 300
+num_episodes = 200
+learning_rate = 1e-4
 
 # Define Model
 class PPO(nn.Module):
@@ -56,14 +57,15 @@ device = torch.device("cuda")
 model = PPO(3).to(device)
 
 # Optimizer for automatically adjusting parameters
-optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
 # Start environment and get inital observation
-obs, _ = env.reset()
 
 for episode in range(num_episodes):
-	print(f"EPISODE {episode}")
+	print(f"==========\n\nEPISODE {episode}\n\n==========")
 	done = False
+
+	obs, _ = env.reset()
 
 	episode_reward = 0.0
 
@@ -78,12 +80,21 @@ for episode in range(num_episodes):
 
 		# Sample action from fixed-std Normal distribution (discrete math)
 		dist = Normal(action_mean, action_std) # Get mean and standard deviation into dist
-		action = dist.sample() # Sample Normal distribution
+		action = torch.tanh(dist.sample()) # Sample Normal distribution
 		probability = dist.log_prob(action).sum(dim=1) # Get the logarithm of the probability that action is taken given the distribution
 		# We need the probability of the action so we can computer policy loss later, and clip it using PPO.
 
+		# Convert action tensor into numpy array for Gymnasium
+		steering = action[..., 0]
+		gas = torch.clamp(action[..., 1], min=0.0)
+		brake = torch.clamp(action[..., 2], min=0.0)
+
+		action_choice = torch.stack([steering, gas, brake], dim=-1)
+		action_choice = action_choice.squeeze(0).cpu().numpy()
+
 		# Get new observation and reward after taking action, find out if terminated
-		obs, reward, terminated, truncated, _ = env.step(action.squeeze(0).cpu().numpy())
+
+		obs, reward, terminated, truncated, _ = env.step(action_choice)
 		done = terminated or truncated
 
 		# Store data for optimization
@@ -120,9 +131,11 @@ for episode in range(num_episodes):
 	action_tensor = torch.stack(data["actions"], 0)
 	old_prob_tensor = torch.tensor(data["probabilites"], dtype=torch.float32, device=device)
 
+	print(states_tensor)
+
 	for _ in range(epochs):
-		action_means, values = model(states_tensor)
-		dist = Normal(action_means, action_std) # Create a Normal distribition using mean from mean of concatenated tensors
+		new_means, new_values = model(states_tensor)
+		dist = Normal(new_means, action_std) # Create a Normal distribition using mean from mean of concatenated tensors
 
 		log_probs = dist.log_prob(action_tensor).sum(dim=1)
 
@@ -130,13 +143,15 @@ for episode in range(num_episodes):
 		ratio = (log_probs - old_prob_tensor).exp()
 
 		# Finally, we can calculate the surrogate policy loss (see equation in paper)
+
 		# We need to get the clipped and unclipped surrogate objectives
 		L_uncp = advantages * ratio
+
 		# Clip surrgoate with torch.clamp() using epsilon hyperparameter
 		L_clip = advantages * torch.clamp(ratio, 1 - epsilon, 1 + epsilon)
 
 		ppo_loss = -torch.min(L_uncp, L_clip).mean()
-		value_loss = 0.5 * (returns - values.squeeze()).pow(2).mean()
+		value_loss = 0.5 * (returns - new_values.squeeze()).pow(2).mean()
 		loss = ppo_loss + value_loss
 
 		# Pass loss to optimizer to configure parameters for next ep
