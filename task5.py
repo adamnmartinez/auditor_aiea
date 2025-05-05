@@ -21,19 +21,3 @@ for _ in range(1000):
 	obs, reward, done, info = vec_env.step(action)
 
 	vec_env.render("rgb_array")
-
-###
-#episode_finished = False
-
-#while not episode_finished:
-#	action = env.action_space.sample()
-#	observation, reward, terminated, truncated, info = env.step(action)
-
-#	env.render()
-
-#	print(action)
-
-#	episode_finished = terminated or truncated
-
-#env.close()
-###

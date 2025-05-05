@@ -9,22 +9,26 @@ from torch.nn.utils import clip_grad_norm_
 env = gym.make('CarRacing-v2', render_mode="rgb_array", continuous=True)
 
 # Init Writer for Tensorboard Display
-writer = SummaryWriter(log_dir="ppo_logs")
+writer = SummaryWriter(log_dir="ppo2_logs")
 
 # Convolution Variables
 window_size = 5
 stride = 2
 
 # Hyperparameters
-action_std = 0.1 # Standard deviation for action Normal distribution
+action_std_init = 0.5 # Standard deviation for action Normal distribution
+action_std_min = 0.1 # Standard deviation for action Normal distribution
+action_std = action_std_init # Standard deviation for action Normal distribution
+warmup_episodes = 25 # Grace period of decay to allow for exploration
+decay_episodes = 100 # How many episodes after warmup does STD take to decay?
 epsilon = 0.2 # How much should policy be allowed to change?
 gamma = 0.8 # Discount factor for return calculation
-epochs = 4
-num_episodes = 500
+epochs = 6 # TASK 8: Increased epochs to 6
+num_episodes = 300
 learning_rate = 1e-4
 
 # Define Model
-class ACNN(nn.Module):
+class ACNN2(nn.Module):
 	def __init__(self, action_dimensions):
 		super().__init__()
 
@@ -41,7 +45,9 @@ class ACNN(nn.Module):
 		# Fully Connected Layers to translate identified shapes in convultion as features
 		# Flattened input (32, 9, 9) will have size 32*9*9 = 2592
 		# We will reduce the large size 2592 vector to 128 to make computation easier
-		self.fc = nn.Sequential(nn.Flatten(), nn.Linear(2592, 128), nn.ReLU())
+
+		# TASK 8: Add an extra layer for feature processing!
+		self.fc = nn.Sequential(nn.Flatten(), nn.Linear(2592, 1296), nn.ReLU(), nn.Linear(1296, 128), nn.ReLU())
 
 		self.actor = nn.Linear(128, action_dimensions) # Outputs action in 3 dimensions (steering, acceleration, gas)
 		self.critic = nn.Linear(128, 1) # Outputs V(s)
@@ -54,7 +60,7 @@ class ACNN(nn.Module):
 # Initalize model, use cuda (or "cpu") for device
 device = torch.device("cuda")
 
-model = ACNN(3).to(device)
+model = ACNN2(3).to(device)
 
 # Optimizer for automatically adjusting parameters
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -107,6 +113,8 @@ for episode in range(num_episodes):
 		data["probabilites"].append(probability.item())
 		episode_reward += reward
 
+		# print(f"Episode {episode}: Step Reward {reward} -> New Episode Reward {episode_reward}")
+
 	# Before we end the episode, use PPO to optimize the results!
 
 	# First, we're going to calculate return recursively using G_t = r_t + gamma * G_{t+1}
@@ -130,8 +138,6 @@ for episode in range(num_episodes):
 	states_tensor = torch.stack(data["states"], 0)
 	action_tensor = torch.stack(data["actions"], 0)
 	old_prob_tensor = torch.tensor(data["probabilites"], dtype=torch.float32, device=device)
-
-	print(states_tensor)
 
 	for _ in range(epochs):
 		new_means, new_values = model(states_tensor)
@@ -159,6 +165,17 @@ for episode in range(num_episodes):
 		loss.backward()
 		clip_grad_norm_(model.parameters(), max_norm=0.5)
 		optimizer.step()
+
+	if (episode < warmup_episodes):
+		print("(WARMUP) ", end="")
+
+	print(f"Episode {episode} concluded.")
+	print(f" - Ending standard deviation: {action_std}")
+	print(f" - Ending reward {episode_reward}")
+
+	# TASK 8: ADDED STANDARD DEVIATION DECAY
+	if (episode > warmup_episodes):
+		action_std = max(action_std_min, action_std_init - (episode / decay_episodes) * (action_std_init - action_std_min))
 
 	writer.add_scalar("Reward/Episode", episode_reward, episode)
 	writer.add_scalar("Loss/Policy", ppo_loss.item(), episode)
