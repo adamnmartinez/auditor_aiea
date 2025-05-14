@@ -46,10 +46,11 @@ def main():
 
   if os.path.exists(model_path):
     print("\n=======\n\nModel Found...\n\n=======\n")
+    model = DQN(MlpPolicy, env, verbose=1, tensorboard_log="./dqn_training_logs", exploration_fraction=0.2, exploration_final_eps=0.1)
     model = DQN.load(model_path, env=env)
   else:
-    print("\n=======\n\nNo Model Found...\n\n=======\n")
-    model = DQN(MlpPolicy, env, verbose=1, tensorboard_log="./carla_dqn_logs", exploration_fraction=0.1, exploration_final_eps=0.02)
+    print("\n=======\n\nNo Model Found... Quitting...\n\n=======\n")
+    exit()
 
   def evaluate(model, env, num_episodes=10):
     obs = env.reset()
@@ -58,42 +59,25 @@ def main():
     for ep in range(num_episodes):
       done = False
       total_rewards = 0
+      steps = 0
       while not done:
         action, _states = model.predict(obs)
         obs, rewards, done, info = env.step(action)
         total_rewards += rewards
       episode_rewards.append(total_rewards)
+      print(f"EVAL {ep} DONE")
 
     return episode_rewards
 
-  print("\n=======\n\nTraining Model...\n\n=======\n")
+  print(f"\n=======\n\nEvaluating Model...\n\n=======\n")
 
-  step = 0
-  learning_periods = 1000
-  learning_period_length = 1000
+  episode_rewards = evaluate(model, env, 10)
+  avg_reward = sum(episode_rewards) / len(episode_rewards)
 
-  # Handles replay buffer, policy updates, and tensorboard writes.
-  for _ in range(learning_periods):
-    print(f"\n=======\n\nTraining Period {step} Started.\n\n=======\n")
-
-    model.learn(total_timesteps=learning_period_length, reset_num_timesteps=False)
-    model.save(model_path)
-
-    print(f"\n=======\n\nTraining Period {step} Complete.\n\n=======\n")
-    print(f"\n=======\n\nEvaluating Model...\n\n=======\n")
-
-    episode_rewards = evaluate(model, env)
-    avg_reward = sum(episode_rewards) / len(episode_rewards)
-    print(f"Rewards = {avg_reward}")
-    # model.logger.record("rollout/ep_avg_reward", avg_reward)
-    # model.logger.dump(step=step * learning_period_length)
-
-    print(f"\n=======\n\nEvaluation Period {step} Complete\n\n=======\n")
-
-    step += 1
-
-  print("\n=======\n\nTraining Complete.\n\n=======\n")
-
+  print(f"\n=======\n\nEvaluation Complete\n\n=======\n")
+  print(episode_rewards)
+  print(f" - AVG: {avg_reward}")
+  print("\n==============\n")
 
 if __name__ == '__main__':
   main()
