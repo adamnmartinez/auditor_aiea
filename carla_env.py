@@ -495,6 +495,11 @@ class CarlaEnv(gym.Env):
     return False
 
   def _try_spawn_random_walker_at(self, transform):
+
+    ### Don't spawn other vehicles ###
+    return True
+    ###
+
     """Try to spawn a walker at specific transform with random bluprint.
 
     Args:
