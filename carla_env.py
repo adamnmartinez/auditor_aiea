@@ -495,8 +495,7 @@ class CarlaEnv(gym.Env):
     return False
 
   def _try_spawn_random_walker_at(self, transform):
-
-    ### Don't spawn other vehicles ###
+    # Don't spawn other vehicles
     return True
     ###
 
@@ -667,6 +666,10 @@ class CarlaEnv(gym.Env):
     if abs(dis) > self.out_lane_thres:
       r_out = -1
 
+    # Added - reward for inline close to lane
+    distance_from_lane = abs(dis)
+    r_inlane = max(0, 1 - distance_from_lane)
+
     # longitudinal speed
     lspeed = np.array([v.x, v.y])
     lspeed_lon = np.dot(lspeed, w)
@@ -679,8 +682,11 @@ class CarlaEnv(gym.Env):
     # cost for lateral acceleration
     r_lat = - abs(self.ego.get_control().steer) * lspeed_lon**2
 
-    #r = 200*r_collision + 5*r_speed + 10*r_fast + 2*r_out + r_steer*5 + 0.2*r_lat - 0.1
-    r = 200*r_collision + 0*r_speed + 0*r_fast + 2*r_out + r_steer*5 + 0.2*r_lat - 0.1
+    r_alive = 0.1
+
+    # r = 200*r_collision + 5*r_speed + 10*r_fast + 2*r_out + r_steer*5 + 0.2*r_lat - 0.1
+    r = 200*r_collision + 2*r_out + 5*r_steer + r_alive + 3*r_inlane
+    # r = 200*r_collision + 2*r_out + 1*r_steer + r_alive + 3*r_inlane
 
     return r
 
