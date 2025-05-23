@@ -1,4 +1,5 @@
 import gymnasium as gym
+from gymnasium.wrappers import GrayScaleObservation
 import torch.nn as nn
 import torch
 import random
@@ -9,22 +10,23 @@ from numpy import mean
 
 # Define Environment
 env = gym.make('CarRacing-v2', render_mode="rgb_array", continuous=True)
+env = GrayScaleObservation(env, keep_dim=True)
 
 # Init Writer for Tensorboard Display
 writer = SummaryWriter(log_dir="dqn_logs")
 
 # Hyperparameters
 action_std = 0.1 # Standard deviation for action Normal distribution
-num_episodes = 100
+num_episodes = 1000
 epsilon_init = 1.0
 epsilon = epsilon_init # Epsilon-greedy search
-epsilon_decay_episodes = 30 # After how many episodes do we decay down to the min?
+epsilon_decay_episodes = 10 # After how many episodes do we decay down to the min?
 epsilon_min = 0.1 # Minimum ratio of random actions
-gamma = 0.8 # Discount factor for return calculation
+gamma = 0.99 # Discount factor for return calculation
 learning_rate = 1e-4
 target_update_frequency = 200 # How often do we update Target Network?
 warmup_threshold = 10000 # We need at this many experiences in the buffer to conclude warmup
-buffer_capacity = 20000
+buffer_capacity = 30000
 
 # We are using a Q-Network on a continuous action space, so we need to discretize the actions!
 disc_actions = [
@@ -49,15 +51,36 @@ class DQN(nn.Module):
 		# Three channels, we'll use 32, 64, and 64 again to filter for each conv layer respectively
 		# We used 3 convultion layer for deep processing
 		# Use ReLU for activation
-		self.conv = nn.Sequential(nn.Conv2d(3, 32, kernel_size=8, stride=4), nn.ReLU(), nn.Conv2d(32, 64, kernel_size=4, stride=2), nn.ReLU(), nn.Conv2d(64, 64, kernel_size=3, stride=1), nn.ReLU())
+
+		self.conv = nn.Sequential(
+			# For RGB
+			#nn.Conv2d(3, 32, kernel_size=8, stride=4),
+
+			# For Greyscale
+			nn.Conv2d(1, 32, kernel_size=8, stride=4),
+			nn.ReLU(),
+			nn.Conv2d(32, 64, kernel_size=4, stride=2),
+			nn.ReLU(),
+			nn.Conv2d(64, 64, kernel_size=3, stride=1),
+			nn.ReLU()
+		)
 
 		# Convolution Output Shape is 64 channels, 8x8 feature map
 
 		# Fully Connected Layers to translate identified shapes in convultion as features
 		# Flattened input (64, 8, 8) will have size 64*8*8 = 4096
 		# We will reduce the large size 2592 vector to 128 to make computation easier
-		self.fc1 = nn.Sequential(nn.Flatten(), nn.Linear(4096, 256), nn.ReLU())
-		self.fc2 = nn.Sequential(nn.Flatten(), nn.Linear(256, action_count))
+
+		self.fc1 = nn.Sequential(
+			nn.Flatten(),
+			nn.Linear(4096, 512),
+			nn.ReLU()
+		)
+
+		self.fc2 = nn.Sequential(
+			nn.Flatten(),
+			 nn.Linear(512, action_count)
+		)
 
 	def forward(self, state):
 		state = self.conv(state)
@@ -106,7 +129,7 @@ rbuffer = replay_buffer(buffer_capacity)
 # Start environment and get inital observation
 
 for episode in range(num_episodes):
-	print(f"==========\n\nEPISODE {episode}\n\n==========")
+	print(f"==========\n\nEPISODE {episode+1}/{num_episodes}\n\n==========")
 	done = False
 	obs, _ = env.reset()
 	episode_reward = 0.0
@@ -124,7 +147,6 @@ for episode in range(num_episodes):
 
 		# Use an epsilon-greedy policy to pick an action
 		r = random.random()
-
 		if (r > epsilon):
 			action_index = torch.argmax(q_values).item()
 		else:
@@ -154,10 +176,9 @@ for episode in range(num_episodes):
 				# Predict Q Value using Target (Slow Update) Model
 				target_q = compute_bellman(torch.tensor([xp["reward"]], device=device), xp["next"],  gamma, target_model).squeeze()
 
-				# Predict Q Value using Policy (Fast Update) Model
-				# target_q = compute_bellman(state, torch.tensor([reward], device=device), next_state,  gamma, model).squeeze()
+			#target_values = target_model(xp["state"])
+			#target_q = target_values[0][disc_actions.index(xp["action"])]
 
-			# 3b: PREDICT Q WITH POLICY NETWORK
 			predicted_values = model(xp["state"])
 			predicted_q = predicted_values[0][disc_actions.index(xp["action"])]
 
@@ -175,10 +196,8 @@ for episode in range(num_episodes):
 		# STEP 4: MAINTAIN TARGET NETWORK
 		# Every few steps...
 		n = n + 1
-		if n >= target_update_frequency:
+		if n % target_update_frequency == 0:
 			print(f"Episode {episode}, Copying policy network to target")
-			n = 0
-			# Copy weights to Target Q Network, we'll use this for bellman because its more stable than the policy model
 			target_model.load_state_dict(model.state_dict())
 
 		steps += 1
@@ -192,6 +211,7 @@ for episode in range(num_episodes):
 	print(f"Episode {episode} concluded after {steps} steps")
 	print(f" - Ending experience buffer size: {rbuffer.length()}")
 	print(f" - Ending epsilon value: {epsilon}")
+	print(f" - Ending Reward: {episode_reward}")
 	writer.add_scalar("Reward/Episode", episode_reward, episode)
 	writer.add_scalar("Loss/Value", mean_episode_loss, episode)
 

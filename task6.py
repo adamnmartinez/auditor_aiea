@@ -1,4 +1,5 @@
 import gymnasium as gym
+from gymnasium.wrappers import GrayScaleObservation
 import torch.nn as nn
 import torch
 from torch.distributions import Normal
@@ -7,6 +8,7 @@ from torch.nn.utils import clip_grad_norm_
 
 # Define Environment
 env = gym.make('CarRacing-v2', render_mode="rgb_array", continuous=True)
+env = GrayScaleObservation(env, keep_dim=True)
 
 # Init Writer for Tensorboard Display
 writer = SummaryWriter(log_dir="ppo_logs")
@@ -18,9 +20,9 @@ stride = 2
 # Hyperparameters
 action_std = 0.1 # Standard deviation for action Normal distribution
 epsilon = 0.2 # How much should policy be allowed to change?
-gamma = 0.8 # Discount factor for return calculation
+gamma = 0.99 # Discount factor for return calculation
 epochs = 4
-num_episodes = 500
+num_episodes = 1000
 learning_rate = 1e-4
 
 # Define Model
@@ -34,17 +36,25 @@ class ACNN(nn.Module):
 		# Three channels, we'll use 16, 18, and 32 filter for each conv layer respectively
 		# We used 3 convultion layer for deep processing
 		# Use ReLU for activation
-		self.conv = nn.Sequential(nn.Conv2d(3, 16, kernel_size=window_size, stride=stride), nn.ReLU(), nn.Conv2d(16, 18, kernel_size=window_size, stride=stride), nn.ReLU(), nn.Conv2d(18, 32, kernel_size=window_size, stride=stride), nn.ReLU())
+		self.conv = nn.Sequential(
+			#nn.Conv2d(3, 16, kernel_size=window_size, stride=stride),
+			nn.Conv2d(1, 16, kernel_size=window_size, stride=stride),
+			nn.ReLU(),
+			nn.Conv2d(16, 18, kernel_size=window_size, stride=stride),
+			nn.ReLU(),
+			nn.Conv2d(18, 32, kernel_size=window_size, stride=stride),
+			nn.ReLU()
+		)
 
 		# Convolution Output Shape is 32 channels, 9x9 image
 
 		# Fully Connected Layers to translate identified shapes in convultion as features
 		# Flattened input (32, 9, 9) will have size 32*9*9 = 2592
 		# We will reduce the large size 2592 vector to 128 to make computation easier
-		self.fc = nn.Sequential(nn.Flatten(), nn.Linear(2592, 128), nn.ReLU())
+		self.fc = nn.Sequential(nn.Flatten(), nn.Linear(2592, 512), nn.ReLU())
 
-		self.actor = nn.Linear(128, action_dimensions) # Outputs action in 3 dimensions (steering, acceleration, gas)
-		self.critic = nn.Linear(128, 1) # Outputs V(s)
+		self.actor = nn.Linear(512, action_dimensions) # Outputs action in 3 dimensions (steering, acceleration, gas)
+		self.critic = nn.Linear(512, 1) # Outputs V(s)
 
 	def forward(self, state):
 		state = self.conv(state)
