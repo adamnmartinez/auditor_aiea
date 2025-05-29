@@ -1,29 +1,22 @@
 import gymnasium as gym
+from gymnasium.wrappers import GrayScaleObservation
 import torch.nn as nn
 import torch
 from torch.distributions import Normal
 from torch.utils.tensorboard import SummaryWriter
 from torch.nn.utils import clip_grad_norm_
 
-# Define Environment
-env = gym.make('CarRacing-v2', render_mode="rgb_array", continuous=True)
-
-# Init Writer for Tensorboard Display
-writer = SummaryWriter(log_dir="ppo2_logs")
-
-# Convolution Variables
+# Hyperparameters
 window_size = 5
 stride = 2
-
-# Hyperparameters
 action_std_init = 0.5 # Standard deviation for action Normal distribution
 action_std_min = 0.1 # Standard deviation for action Normal distribution
 action_std = action_std_init # Standard deviation for action Normal distribution
-warmup_episodes = 25 # Grace period of decay to allow for exploration
-decay_episodes = 100 # How many episodes after warmup does STD take to decay?
+warmup_episodes = 100 # Grace period of decay to allow for exploration
+decay_episodes = 150 # How many episodes after warmup does STD take to decay?
 epsilon = 0.2 # How much should policy be allowed to change?
 gamma = 0.8 # Discount factor for return calculation
-epochs = 6 # TASK 8: Increased epochs to 6
+epochs = 4
 num_episodes = 300
 learning_rate = 1e-4
 
@@ -31,66 +24,82 @@ learning_rate = 1e-4
 class ACNN2(nn.Module):
 	def __init__(self, action_dimensions):
 		super().__init__()
+  #
+		# self.conv = nn.Sequential(
+		# 	nn.Conv2d(1, 16, kernel_size=window_size, stride=stride),
+		# 	nn.ReLU(),
+		# 	nn.Conv2d(16, 18, kernel_size=window_size, stride=stride),
+		# 	nn.ReLU(),
+		# 	nn.Conv2d(18, 32, kernel_size=window_size, stride=stride),
+		# 	nn.ReLU())
+  #
+		# self.fc = nn.Sequential(nn.Flatten(), nn.Linear(2592, 1296), nn.ReLU(), nn.Linear(1296, 512), nn.ReLU())
 
-		# For Car-Racing, out input layer ouput shape is a 96x96 image with 3 channels
+		self.conv = nn.Sequential(
+			nn.Conv2d(1, 32, kernel_size=8, stride=4),
+			nn.ReLU(),
+			nn.Conv2d(32, 64, kernel_size=4, stride=2),
+			nn.ReLU(),
+			nn.Conv2d(64, 64, kernel_size=3, stride=1),
+			nn.ReLU()
+		)
 
-		# Convolution Layers
-		# Three channels, we'll use 16, 18, and 32 filter for each conv layer respectively
-		# We used 3 convultion layer for deep processing
-		# Use ReLU for activation
-		self.conv = nn.Sequential(nn.Conv2d(3, 16, kernel_size=window_size, stride=stride), nn.ReLU(), nn.Conv2d(16, 18, kernel_size=window_size, stride=stride), nn.ReLU(), nn.Conv2d(18, 32, kernel_size=window_size, stride=stride), nn.ReLU())
+		self.fc = nn.Sequential(
+			nn.Flatten(),
+			nn.Linear(4096, 1296),
+			nn.ReLU(),
+			nn.Linear(1296, 512),
+			nn.ReLU()
+		)
 
-		# Convolution Output Shape is 32 channels, 9x9 image
-
-		# Fully Connected Layers to translate identified shapes in convultion as features
-		# Flattened input (32, 9, 9) will have size 32*9*9 = 2592
-		# We will reduce the large size 2592 vector to 128 to make computation easier
-
-		# TASK 8: Add an extra layer for feature processing!
-		self.fc = nn.Sequential(nn.Flatten(), nn.Linear(2592, 1296), nn.ReLU(), nn.Linear(1296, 128), nn.ReLU())
-
-		self.actor = nn.Linear(128, action_dimensions) # Outputs action in 3 dimensions (steering, acceleration, gas)
-		self.critic = nn.Linear(128, 1) # Outputs V(s)
+		self.actor = nn.Linear(512, action_dimensions)
+		self.critic = nn.Linear(512, 1)
 
 	def forward(self, state):
 		state = self.conv(state)
 		state = self.fc(state)
 		return self.actor(state), self.critic(state)
 
-# Initalize model, use cuda (or "cpu") for device
 device = torch.device("cuda")
-
+env = gym.make('CarRacing-v2', render_mode="rgb_array", continuous=True)
+env = GrayScaleObservation(env, keep_dim=True)
+writer = SummaryWriter(log_dir="ppo2_logs")
 model = ACNN2(3).to(device)
-
-# Optimizer for automatically adjusting parameters
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+episode = 0
 
-# Start environment and get inital observation
+def reset_sim():
+	global env
 
-for episode in range(num_episodes):
-	print(f"==========\n\nEPISODE {episode}\n\n==========")
+	print("  - Resetting Environment")
+	env = gym.make('CarRacing-v2', render_mode="rgb_array", continuous=True)
+	env = GrayScaleObservation(env, keep_dim=True)
+
+def run_episode(name, log_writer):
+	global episode
+	global action_std
+	global env
+
 	done = False
-
 	obs, _ = env.reset()
-
 	episode_reward = 0.0
-
 	data = {"states": [], "actions": [], "probabilites": [], "values": [], "rewards": []}
 
+	print("  - Starting Training")
 	while not done:
-		# Preprocess state and run policy
 		state = torch.tensor(obs, dtype=torch.float32, device=device).permute(2,0,1).unsqueeze(0) / 255.0
+
+		if torch.isnan(state).any():
+			raise Exception('NaN in Training State')
 
 		with torch.no_grad():
 			action_mean, value = model(state)
 
-		# Sample action from fixed-std Normal distribution (discrete math)
-		dist = Normal(action_mean, action_std) # Get mean and standard deviation into dist
-		action = torch.tanh(dist.sample()) # Sample Normal distribution
-		probability = dist.log_prob(action).sum(dim=1) # Get the logarithm of the probability that action is taken given the distribution
-		# We need the probability of the action so we can computer policy loss later, and clip it using PPO.
+		dist = Normal(action_mean, action_std)
 
-		# Convert action tensor into numpy array for Gymnasium
+		action = torch.tanh(dist.sample())
+		probability = dist.log_prob(action).sum(dim=1)
+
 		steering = action[..., 0]
 		gas = torch.clamp(action[..., 1], min=0.0)
 		brake = torch.clamp(action[..., 2], min=0.0)
@@ -98,14 +107,9 @@ for episode in range(num_episodes):
 		action_choice = torch.stack([steering, gas, brake], dim=-1)
 		action_choice = action_choice.squeeze(0).cpu().numpy()
 
-		# Get new observation and reward after taking action, find out if terminated
-
 		obs, reward, terminated, truncated, _ = env.step(action_choice)
 		done = terminated or truncated
 
-		# Store data for optimization
-		# Remove batch dimension from output shapes (state and action)
-		# We do this to store them as single experiences in the replay buffer (s, a, s')
 		data["states"].append(state.squeeze(0))
 		data["actions"].append(action.squeeze(0))
 		data["values"].append(value.item())
@@ -113,73 +117,218 @@ for episode in range(num_episodes):
 		data["probabilites"].append(probability.item())
 		episode_reward += reward
 
-		# print(f"Episode {episode}: Step Reward {reward} -> New Episode Reward {episode_reward}")
-
-	# Before we end the episode, use PPO to optimize the results!
-
-	# First, we're going to calculate return recursively using G_t = r_t + gamma * G_{t+1}
-
 	returns = []
 	G = 0
-	# Our base case is the last reward we get, so we must look at out rewards backwards to find the return of the episode
 	for r in reversed(data["rewards"]):
 		G = r + gamma * G
 		returns.insert(0, G)
 
 	returns = torch.tensor(returns, dtype=torch.float32, device=device)
 
-	# Next we'll get a tensor for the advantages of each action
 	values_tensor = torch.tensor(data["values"], dtype=torch.float32, device=device)
 
-	# Get advantage by getting the difference between the reward we got and the value of the state
 	advantages = returns - values_tensor
 
-	# Combine the states by stacking them into one new tensor, along the 0th dimension
+	# Normalize advantages to prevent NaN
+	advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
 	states_tensor = torch.stack(data["states"], 0)
 	action_tensor = torch.stack(data["actions"], 0)
 	old_prob_tensor = torch.tensor(data["probabilites"], dtype=torch.float32, device=device)
 
-	for _ in range(epochs):
-		new_means, new_values = model(states_tensor)
-		dist = Normal(new_means, action_std) # Create a Normal distribition using mean from mean of concatenated tensors
+	dataset = torch.utils.data.TensorDataset(states_tensor, action_tensor, old_prob_tensor.detach(), returns.detach(), advantages.detach())
+	dataloader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=True)
 
-		log_probs = dist.log_prob(action_tensor).sum(dim=1)
+	print("  - Starting Optimization")
+	ppo_loss_numeric = 0
+	value_loss_numeric = 0
+	for e in range(epochs):
+# 		if torch.isnan(batch_states).any():
+# 			raise Exception('NaN in Optimization State')
+#
+# 		new_means, new_values = model(states_tensor)
+#
+# 		dist = Normal(new_means, action_std)
+#
+# 		log_probs = dist.log_prob(action_tensor).sum(dim=1)
+#
+# 		ratio = (log_probs - old_prob_tensor).exp()
+#
+# 		L_uncp = advantages * ratio
+#
+# 		L_clip = advantages * torch.clamp(ratio, 1 - epsilon, 1 + epsilon)
+#
+# 		ppo_loss = -torch.min(L_uncp, L_clip).mean()
+# 		value_loss = 0.5 * (returns - new_values.squeeze()).pow(2).mean()
+# 		loss = ppo_loss + value_loss
+#
+# 		optimizer.zero_grad()
+# 		loss.backward()
+# 		clip_grad_norm_(model.parameters(), max_norm=0.5)
+# 		optimizer.step()
+#
+# 		ppo_loss_numeric = ppo_loss.item()
+# 		value_loss_numeric = value_loss.item()
 
-		# Let's get a representation of the change in policy, from old to new
-		ratio = (log_probs - old_prob_tensor).exp()
+		print(f"  - Epoch {e}")
+#
+		for batch_states, batch_actions, batch_probs, batch_returns, batch_advantages in dataloader:
+			if torch.isnan(batch_states).any():
+				raise Exception('NaN in Batched Optimization State')
+				print("=======[ NAN DETECTED IN INPUT STATE ]======")
 
-		# Finally, we can calculate the surrogate policy loss (see equation in paper)
+			means, values = model(batch_states)
 
-		# We need to get the clipped and unclipped surrogate objectives
-		L_uncp = advantages * ratio
+			if torch.isnan(means).any():
+				raise Exception('NaN in Model Output')
+				print("=======[ NAN DETECTED IN OUTPUT MEANS ]======")
 
-		# Clip surrgoate with torch.clamp() using epsilon hyperparameter
-		L_clip = advantages * torch.clamp(ratio, 1 - epsilon, 1 + epsilon)
+			dist = Normal(means, action_std)
 
-		ppo_loss = -torch.min(L_uncp, L_clip).mean()
-		value_loss = 0.5 * (returns - new_values.squeeze()).pow(2).mean()
-		loss = ppo_loss + value_loss
+			log_probs = dist.log_prob(batch_actions).sum(dim=1)
 
-		# Pass loss to optimizer to configure parameters for next ep
-		optimizer.zero_grad()
-		loss.backward()
-		clip_grad_norm_(model.parameters(), max_norm=0.5)
-		optimizer.step()
+			ratio = (log_probs - batch_probs).exp()
 
-	if (episode < warmup_episodes):
-		print("(WARMUP) ", end="")
+			L_uncp = batch_advantages * ratio
 
-	print(f"Episode {episode} concluded.")
-	print(f" - Ending standard deviation: {action_std}")
-	print(f" - Ending reward {episode_reward}")
+			L_clip = batch_advantages * torch.clamp(ratio, 1 - epsilon, 1 + epsilon)
 
-	# TASK 8: ADDED STANDARD DEVIATION DECAY
+			ppo_loss = -torch.min(L_uncp, L_clip).mean()
+			value_loss = 0.5 * (batch_returns - values.squeeze()).pow(2).mean()
+			loss = ppo_loss + value_loss
+
+			optimizer.zero_grad()
+			loss.backward()
+			clip_grad_norm_(model.parameters(), max_norm=0.5)
+			optimizer.step()
+
+			ppo_loss_numeric = ppo_loss.item()
+			value_loss_numeric = value_loss.item()
+
+
 	if (episode > warmup_episodes):
 		action_std = max(action_std_min, action_std_init - (episode / decay_episodes) * (action_std_init - action_std_min))
 
-	writer.add_scalar("Reward/Episode", episode_reward, episode)
-	writer.add_scalar("Loss/Policy", ppo_loss.item(), episode)
-	writer.add_scalar("Loss/Value", value_loss.item(), episode)
+	log_writer.add_scalar(f"{name}/ep_reward", episode_reward, episode)
+	log_writer.add_scalar(f"{name}/policy_loss", ppo_loss_numeric, episode)
+	log_writer.add_scalar(f"{name}/value_loss", value_loss_numeric, episode)
 
-writer.close()
-env.close()
+	episode += 1
+
+if __name__ == "__main__":
+	for episode in range(num_episodes):
+		print(f"==========\n\nEPISODE {episode}\n\n==========")
+		done = False
+
+		obs, _ = env.reset()
+
+		episode_reward = 0.0
+
+		data = {"states": [], "actions": [], "probabilites": [], "values": [], "rewards": []}
+
+		while not done:
+			# Preprocess state and run policy
+			state = torch.tensor(obs, dtype=torch.float32, device=device).permute(2,0,1).unsqueeze(0) / 255.0
+
+			with torch.no_grad():
+				action_mean, value = model(state)
+
+			# Sample action from fixed-std Normal distribution (discrete math)
+			dist = Normal(action_mean, action_std) # Get mean and standard deviation into dist
+			action = torch.tanh(dist.sample()) # Sample Normal distribution
+			probability = dist.log_prob(action).sum(dim=1) # Get the logarithm of the probability that action is taken given the distribution
+			# We need the probability of the action so we can computer policy loss later, and clip it using PPO.
+
+			# Convert action tensor into numpy array for Gymnasium
+			steering = action[..., 0]
+			gas = torch.clamp(action[..., 1], min=0.0)
+			brake = torch.clamp(action[..., 2], min=0.0)
+
+			action_choice = torch.stack([steering, gas, brake], dim=-1)
+			action_choice = action_choice.squeeze(0).cpu().numpy()
+
+			# Get new observation and reward after taking action, find out if terminated
+
+			obs, reward, terminated, truncated, _ = env.step(action_choice)
+			done = terminated or truncated
+
+			# Store data for optimization
+			# Remove batch dimension from output shapes (state and action)
+			# We do this to store them as single experiences in the replay buffer (s, a, s')
+			data["states"].append(state.squeeze(0))
+			data["actions"].append(action.squeeze(0))
+			data["values"].append(value.item())
+			data["rewards"].append(reward)
+			data["probabilites"].append(probability.item())
+			episode_reward += reward
+
+			# print(f"Episode {episode}: Step Reward {reward} -> New Episode Reward {episode_reward}")
+
+		# Before we end the episode, use PPO to optimize the results!
+
+		# First, we're going to calculate return recursively using G_t = r_t + gamma * G_{t+1}
+
+		returns = []
+		G = 0
+		# Our base case is the last reward we get, so we must look at out rewards backwards to find the return of the episode
+		for r in reversed(data["rewards"]):
+			G = r + gamma * G
+			returns.insert(0, G)
+
+		returns = torch.tensor(returns, dtype=torch.float32, device=device)
+
+		# Next we'll get a tensor for the advantages of each action
+		values_tensor = torch.tensor(data["values"], dtype=torch.float32, device=device)
+
+		# Get advantage by getting the difference between the reward we got and the value of the state
+		advantages = returns - values_tensor
+
+		# Combine the states by stacking them into one new tensor, along the 0th dimension
+		states_tensor = torch.stack(data["states"], 0)
+		action_tensor = torch.stack(data["actions"], 0)
+		old_prob_tensor = torch.tensor(data["probabilites"], dtype=torch.float32, device=device)
+
+		for _ in range(epochs):
+			new_means, new_values = model(states_tensor)
+			dist = Normal(new_means, action_std) # Create a Normal distribition using mean from mean of concatenated tensors
+
+			log_probs = dist.log_prob(action_tensor).sum(dim=1)
+
+			# Let's get a representation of the change in policy, from old to new
+			ratio = (log_probs - old_prob_tensor).exp()
+
+			# Finally, we can calculate the surrogate policy loss (see equation in paper)
+
+			# We need to get the clipped and unclipped surrogate objectives
+			L_uncp = advantages * ratio
+
+			# Clip surrgoate with torch.clamp() using epsilon hyperparameter
+			L_clip = advantages * torch.clamp(ratio, 1 - epsilon, 1 + epsilon)
+
+			ppo_loss = -torch.min(L_uncp, L_clip).mean()
+			value_loss = 0.5 * (returns - new_values.squeeze()).pow(2).mean()
+			loss = ppo_loss + value_loss
+
+			# Pass loss to optimizer to configure parameters for next ep
+			optimizer.zero_grad()
+			loss.backward()
+			clip_grad_norm_(model.parameters(), max_norm=0.5)
+			optimizer.step()
+
+		if (episode < warmup_episodes):
+			print("(WARMUP) ", end="")
+
+		print(f"Episode {episode} concluded.")
+		print(f" - Ending standard deviation: {action_std}")
+		print(f" - Ending reward {episode_reward}")
+
+		# TASK 8: ADDED STANDARD DEVIATION DECAY
+		if (episode > warmup_episodes):
+			action_std = max(action_std_min, action_std_init - (episode / decay_episodes) * (action_std_init - action_std_min))
+
+		writer.add_scalar("Reward/Episode", episode_reward, episode)
+		writer.add_scalar("Loss/Policy", ppo_loss.item(), episode)
+		writer.add_scalar("Loss/Value", value_loss.item(), episode)
+
+	writer.close()
+	env.close()
