@@ -23,8 +23,8 @@ class Agent:
 		return self.train_func(self.name, writer)
 
 agents = [
-	# Agent("PPO", ppo_episode),
-	# Agent("DQN", dqn_episode),
+	Agent("PPO", ppo_episode),
+	Agent("DQN", dqn_episode),
 	Agent("PPO+", ppo2_episode)
 ]
 
@@ -34,15 +34,7 @@ for episode in range(num_episodes):
 	print(f"==========[ Episode {episode + 1}/{num_episodes}, Started ]==========")
 	for agent in agents:
 		print(f" - Running {agent.name}...")
-  #
-		# try:
-		# 	agent.run_episode(writer)
-		# except:
-		# 	print("  - An error occured during this run.")
-
 		agent.run_episode(writer)
 		print("   - Concluded.")
 
 writer.close()
-for agent in agents:
-	agent.env.close()

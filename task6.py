@@ -14,62 +14,53 @@ epsilon = 0.2 # How much should policy be allowed to change?
 gamma = 0.99 # Discount factor for return calculation
 epochs = 4
 num_episodes = 1000
-learning_rate = 1e-4
+learning_rate = 1e-8
 
 # Define Model
 class ACNN(nn.Module):
 	def __init__(self, action_dimensions):
 		super().__init__()
 
-		# self.conv = nn.Sequential(
-		# 	nn.Conv2d(1, 16, kernel_size=window_size, stride=stride),
-		# 	nn.ReLU(),
-		# 	nn.Conv2d(16, 18, kernel_size=window_size, stride=stride),
-		# 	nn.ReLU(),
-		# 	nn.Conv2d(18, 32, kernel_size=window_size, stride=stride),
-		# 	nn.ReLU()
-		# )
-  #
-		# self.fc = nn.Sequential(nn.Flatten(), nn.Linear(2592, 512), nn.ReLU())
-
 		self.conv = nn.Sequential(
-			nn.Conv2d(1, 32, kernel_size=8, stride=4),
+			nn.Conv2d(1, 16, kernel_size=window_size, stride=stride),
 			nn.ReLU(),
-			nn.Conv2d(32, 64, kernel_size=4, stride=2),
+			nn.Conv2d(16, 18, kernel_size=window_size, stride=stride),
 			nn.ReLU(),
-			nn.Conv2d(64, 64, kernel_size=3, stride=1),
+			nn.Conv2d(18, 32, kernel_size=window_size, stride=stride),
 			nn.ReLU()
 		)
 
-		self.fc = nn.Sequential(
-			nn.Flatten(),
-			nn.Linear(4096, 1296),
-			nn.ReLU(),
-			nn.Linear(1296, 512),
-			nn.ReLU()
-		)
+		#self.fc = nn.Sequential(nn.Flatten(), nn.Linear(2592, 512), nn.ReLU())
+		self.fc = nn.Sequential(nn.Flatten(), nn.Linear(2592, 1296), nn.ReLU(), nn.Linear(1296, 512), nn.ReLU())
+
 
 		self.actor = nn.Linear(512, action_dimensions) # Outputs action in 3 dimensions (steering, acceleration, gas)
 		self.critic = nn.Linear(512, 1) # Outputs V(s)
 
 	def forward(self, state):
+		if torch.isnan(state).any():
+			print("MODEL CANT PROCEED, NAN DETECTED IN INPUT")
+
 		state = self.conv(state)
+
+		if torch.isnan(state).any():
+			print("MODEL CANT PROCEED, NAN DETECTED IN CONV OUTPUT")
+
 		state = self.fc(state)
+
+		if torch.isnan(state).any():
+			print("MODEL CANT PROCEED, NAN DETECTED IN FC OUTPUT")
+
 		return self.actor(state), self.critic(state)
+
 
 device = torch.device("cuda")
 model = ACNN(3).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-env = gym.make('CarRacing-v2', render_mode="rgb_array", continuous=True)
+env = gym.make('CarRacing-v2', render_mode="human", continuous=True)
 env = GrayScaleObservation(env, keep_dim=True)
 writer = SummaryWriter(log_dir="ppo_logs")
 episode = 0
-
-def reset_sim():
-	global env
-
-	env = gym.make('CarRacing-v2', render_mode="rgb_array", continuous=True)
-	env = GrayScaleObservation(env, keep_dim=True)
 
 def run_episode(name, log_writer):
 	global episode
@@ -82,9 +73,6 @@ def run_episode(name, log_writer):
 
 	while not done:
 		state = torch.tensor(obs, dtype=torch.float32, device=device).permute(2,0,1).unsqueeze(0) / 255.0
-
-		if torch.isnan(state).any():
-			raise Exception('NaN in Training State')
 
 		with torch.no_grad():
 			action_mean, value = model(state)
@@ -121,15 +109,13 @@ def run_episode(name, log_writer):
 	values_tensor = torch.tensor(data["values"], dtype=torch.float32, device=device)
 
 	advantages = returns - values_tensor
+	advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
 	states_tensor = torch.stack(data["states"], 0)
 	action_tensor = torch.stack(data["actions"], 0)
 	old_prob_tensor = torch.tensor(data["probabilites"], dtype=torch.float32, device=device)
 
 	for _ in range(epochs):
-		if torch.isnan(states_tensor).any():
-			raise Exception('NaN in Optimization State')
-
 		new_means, new_values = model(states_tensor)
 
 		dist = Normal(new_means, action_std)
@@ -149,6 +135,11 @@ def run_episode(name, log_writer):
 		loss.backward()
 		clip_grad_norm_(model.parameters(), max_norm=0.5)
 		optimizer.step()
+
+		with torch.no_grad():
+			for param in model.parameters():
+				param.data = param.data.clamp(-1e3, 1e3)
+
 
 		ppo_loss_numeric = ppo_loss.item()
 		value_loss_numeric = value_loss.item()

@@ -68,9 +68,6 @@ class DQN(nn.Module):
 		# For Car-Racing, out input layer ouput shape is a 96x96 image with 3 channels
 
 		self.conv = nn.Sequential(
-			# For RGB
-			#nn.Conv2d(3, 32, kernel_size=8, stride=4),
-
 			# For Greyscale
 			nn.Conv2d(1, 32, kernel_size=8, stride=4),
 			nn.ReLU(),
@@ -79,12 +76,6 @@ class DQN(nn.Module):
 			nn.Conv2d(64, 64, kernel_size=3, stride=1),
 			nn.ReLU()
 		)
-
-		# Convolution Output Shape is 64 channels, 8x8 feature map
-
-		# Fully Connected Layers to translate identified shapes in convultion as features
-		# Flattened input (64, 8, 8) will have size 64*8*8 = 4096
-		# We will reduce the large size 2592 vector to 128 to make computation easier
 
 		self.fc1 = nn.Sequential(
 			nn.Flatten(),
@@ -108,7 +99,7 @@ model = DQN(len(disc_actions)).to(device)
 target_model = DQN(len(disc_actions)).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 rbuffer = replay_buffer(buffer_capacity)
-env = gym.make('CarRacing-v2', render_mode="rgb_array", continuous=True)
+env = gym.make('CarRacing-v2', render_mode="human", continuous=True)
 env = GrayScaleObservation(env, keep_dim=True)
 writer = SummaryWriter(log_dir="dqn_logs")
 episode = 0
