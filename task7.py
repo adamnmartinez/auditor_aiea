@@ -9,17 +9,16 @@ from torch.nn.utils import clip_grad_norm_
 from numpy import mean
 
 # Hyperparameters
-action_std = 0.1 # Standard deviation for action Normal distribution
-num_episodes = 1000
-epsilon_init = 1.0
+num_episodes = 5000
+epsilon_init = 0.9
 epsilon = epsilon_init # Epsilon-greedy search
-epsilon_decay_episodes = 250 # After how many episodes do we decay down to the min?
+epsilon_decay_episodes = 100 # After how many episodes do we decay down to the min?
 epsilon_min = 0.1 # Minimum ratio of random actions
-gamma = 0.99 # Discount factor for return calculation
+gamma = 0.95 # Discount factor for return calculation
 learning_rate = 1e-4
-target_update_frequency = 10 # How often do we update Target Network?
+target_update_frequency = 100 # How often do we update Target Network?
 warmup_threshold = 10000 # We need at this many experiences in the buffer to conclude warmup
-buffer_capacity = 30000
+buffer_capacity = 50000
 
 # We are using a Q-Network on a continuous action space, so we need to discretize the actions!
 disc_actions = [
@@ -41,6 +40,7 @@ def compute_bellman(reward, next_state, gamma, compute_model):
 		next_q_values = compute_model(next_state)
 		best_next_q, _ = torch.max(next_q_values, dim=1)
 		bellman_target = reward + gamma * best_next_q
+
 	return bellman_target
 
 class replay_buffer():
@@ -103,10 +103,12 @@ env = gym.make('CarRacing-v2', render_mode="human", continuous=True)
 env = GrayScaleObservation(env, keep_dim=True)
 writer = SummaryWriter(log_dir="dqn_logs")
 episode = 0
+step = 0
 
 def run_episode(name, log_writer):
 	global epsilon
 	global episode
+	global step
 
 	done = False
 	obs, _ = env.reset()
@@ -131,7 +133,9 @@ def run_episode(name, log_writer):
 		obs, reward, terminated, truncated, _ = env.step(action_choice)
 		next_state = torch.tensor(obs, dtype=torch.float32, device=device).permute(2,0,1).unsqueeze(0) / 255.0
 		done = terminated or truncated
+
 		episode_reward += reward
+		log_writer.add_scalar(f"{name}/step_reward", reward, step)
 
 		rbuffer.add({"state": state, "action": action_choice, "reward": reward, "next": next_state, "done": done})
 
@@ -156,6 +160,8 @@ def run_episode(name, log_writer):
 		n = n + 1
 		if n % target_update_frequency == 0:
 			target_model.load_state_dict(model.state_dict())
+
+		step += 1
 
 	if len(data["loss"]) > 0:
 		mean_episode_loss = mean(data["loss"])
@@ -214,10 +220,8 @@ if __name__ == "__main__":
 					target_q = torch.tensor(0.0, device=device)
 				else:
 					# Predict Q Value using Target (Slow Update) Model
-					target_q = compute_bellman(torch.tensor([xp["reward"]], device=device), xp["next"],  gamma, target_model).squeeze()
-
-				#target_values = target_model(xp["state"])
-				#target_q = target_values[0][disc_actions.index(xp["action"])]
+					with torch.no_grad(): # We don't want target-q gradient to influence prime network
+						target_q = compute_bellman(torch.tensor([xp["reward"]], device=device), xp["next"],  gamma, target_model).squeeze()
 
 				predicted_values = model(xp["state"])
 				predicted_q = predicted_values[0][disc_actions.index(xp["action"])]
@@ -237,7 +241,6 @@ if __name__ == "__main__":
 			# Every few steps...
 			n = n + 1
 			if n % target_update_frequency == 0:
-				print(f"Episode {episode}, Copying policy network to target")
 				target_model.load_state_dict(model.state_dict())
 
 			steps += 1

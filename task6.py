@@ -7,13 +7,13 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.nn.utils import clip_grad_norm_
 
 # Hyperparameters
-window_size = 5
+window_size = 3
 stride = 2
 action_std = 0.1 # Standard deviation for action Normal distribution
 epsilon = 0.2 # How much should policy be allowed to change?
 gamma = 0.99 # Discount factor for return calculation
 epochs = 4
-num_episodes = 1000
+num_episodes = 5000
 learning_rate = 1e-8
 
 # Define Model
@@ -30,26 +30,32 @@ class ACNN(nn.Module):
 			nn.ReLU()
 		)
 
-		#self.fc = nn.Sequential(nn.Flatten(), nn.Linear(2592, 512), nn.ReLU())
-		self.fc = nn.Sequential(nn.Flatten(), nn.Linear(2592, 1296), nn.ReLU(), nn.Linear(1296, 512), nn.ReLU())
+		# self.conv = nn.Sequential(
+		# 	## 1, 96, 96 -> Network
+		# 	nn.Conv2d(1, 8, kernel_size=window_size, stride=stride), ## -> 8, 47, 47
+		# 	nn.ReLU(),
+		# 	nn.Conv2d(8, 16, kernel_size=window_size, stride=stride), ## -> 16, 23, 23
+		# 	nn.ReLU(),
+		# 	nn.Conv2d(16, 32, kernel_size=window_size, stride=stride), ## -> 32, 11, 11
+		# 	nn.ReLU(),
+		# 	nn.Conv2d(32, 64, kernel_size=window_size, stride=stride), ## -> 64, 5, 5
+		# 	nn.ReLU()
+		# )
 
+		# self.fc = nn.Sequential(nn.Flatten(), nn.Linear(1600, 800), nn.ReLU(), nn.Linear(800, 512), nn.ReLU())
+
+		self.fc = nn.Sequential(nn.Flatten(), nn.Linear(2592, 512), nn.ReLU())
+		self.fc = nn.Sequential(nn.Flatten(), nn.Linear(2592, 1296), nn.ReLU(), nn.Linear(1296, 512), nn.ReLU())
 
 		self.actor = nn.Linear(512, action_dimensions) # Outputs action in 3 dimensions (steering, acceleration, gas)
 		self.critic = nn.Linear(512, 1) # Outputs V(s)
 
 	def forward(self, state):
-		if torch.isnan(state).any():
-			print("MODEL CANT PROCEED, NAN DETECTED IN INPUT")
-
 		state = self.conv(state)
-
-		if torch.isnan(state).any():
-			print("MODEL CANT PROCEED, NAN DETECTED IN CONV OUTPUT")
-
 		state = self.fc(state)
 
 		if torch.isnan(state).any():
-			print("MODEL CANT PROCEED, NAN DETECTED IN FC OUTPUT")
+			print("WARNING: NAN IN OUTPUT")
 
 		return self.actor(state), self.critic(state)
 
@@ -61,10 +67,12 @@ env = gym.make('CarRacing-v2', render_mode="human", continuous=True)
 env = GrayScaleObservation(env, keep_dim=True)
 writer = SummaryWriter(log_dir="ppo_logs")
 episode = 0
+step = 0
 
 def run_episode(name, log_writer):
 	global episode
 	global env
+	global step
 
 	done = False
 	obs, _ = env.reset()
@@ -78,6 +86,7 @@ def run_episode(name, log_writer):
 			action_mean, value = model(state)
 
 		dist = Normal(action_mean, action_std)
+
 		action = torch.tanh(dist.sample())
 		probability = dist.log_prob(action).sum(dim=1)
 
@@ -97,6 +106,9 @@ def run_episode(name, log_writer):
 		data["rewards"].append(reward)
 		data["probabilites"].append(probability.item())
 		episode_reward += reward
+
+		log_writer.add_scalar(f"{name}/step_reward", reward, step)
+		step += 1
 
 	returns = []
 	G = 0
@@ -151,7 +163,6 @@ def run_episode(name, log_writer):
 
 if __name__ == "__main__":
 	for episode in range(num_episodes):
-		print(f"==========\n\nEPISODE {episode}\n\n==========")
 		done = False
 
 		obs, _ = env.reset()
