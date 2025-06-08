@@ -123,6 +123,19 @@ configurations = [
 		clip_max_norm = 0.5,
 		nn_weight_clamp = 1e3
 	),
+	Config (
+		name = "PPO_24",
+		action_std_init = 0.5,
+		action_std_min = 0.1,
+		warmup_episodes = 500,
+		decay_episodes = 3000,
+		epsilon = 0.2,
+		gamma = 0.8,
+		epochs = 4,
+		learning_rate = 1e-5, 
+		clip_max_norm = 0.5,
+		nn_weight_clamp = 1e3
+	),
 ]
 
 if __name__ == "__main__":
