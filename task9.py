@@ -9,7 +9,7 @@ from torch.nn.utils import clip_grad_norm_
 device = torch.device("cuda")
 writer = SummaryWriter(log_dir="training_logs")
 num_action_dimensions = 3
-num_episodes = 1500
+num_episodes = 5000
 
 class ACNN2(nn.Module):
 	def __init__(self, action_dimensions):
@@ -20,27 +20,46 @@ class ACNN2(nn.Module):
 
 		self.conv = nn.Sequential(	
 			# 1, 96, 96
-			nn.Conv2d(1, 16, kernel_size=window_size, stride=stride), # 16, 46, 46
+			nn.Conv2d(1, 32, kernel_size=8, stride=4), # 32, 23, 23
 			nn.ReLU(),
-			nn.Conv2d(16, 18, kernel_size=window_size, stride=stride), # 18, 21, 21
+			nn.Conv2d(32, 64, kernel_size=4, stride=2), # 64, 10, 10
 			nn.ReLU(),
-			nn.Conv2d(18, 32, kernel_size=window_size, stride=stride), # 32, 9, 9
-			nn.ReLU())
+			nn.Conv2d(64, 64, kernel_size=3, stride=1), # 64, 8, 8
+			nn.ReLU(),
+		)
 
 		self.fc = nn.Sequential(
 			nn.Flatten(), 
-			nn.Linear(2592, 1296), 
-			nn.ReLU(), 
-			nn.Linear(1296, 512), 
-			nn.ReLU()
+			nn.Linear(4096, 512), 
+			nn.ReLU(),
 		)
 
 		self.actor = nn.Linear(512, action_dimensions)
 		self.critic = nn.Linear(512, 1)
 
 	def forward(self, state):
+		input_state = state
+
+		if torch.isnan(state).any():
+			print("STATE NAN WITHIN STATE INPUT")
+			print(input_state)
+
+		input_state = state
+
 		state = self.conv(state)
+
+		if torch.isnan(state).any():
+			print("STATE NAN AFTER CONV")
+			print(input_state)
+
+		input_state = state
+
 		state = self.fc(state)
+
+		if torch.isnan(state).any():
+			print("STATE NAN AFTER FC")
+			print(input_state)
+
 		return self.actor(state), self.critic(state)
 
 class Config:
@@ -92,46 +111,18 @@ class Config:
 
 configurations = [
 	Config (
-		name = "PPO_1",
-		action_std_init = 0.7,
+		name = "PPO_25",
+		action_std_init = 0.5,
 		action_std_min = 0.1,
-		warmup_episodes = 100,
-		decay_episodes = 150,
-		epsilon = 0.4,
+		warmup_episodes = 500,
+		decay_episodes = 1000,
+		epsilon = 0.2,
 		gamma = 0.8,
 		epochs = 4,
-		learning_rate = 1e-7, 
+		learning_rate = 1e-3, 
 		clip_max_norm = 0.5,
-		nn_weight_clamp = 1e3,
+		nn_weight_clamp = 1e3
 	),
-	Config (
-		name = "PPO_2",
-		action_std_init = 0.7,
-		action_std_min = 0.1,
-		warmup_episodes = 100,
-		decay_episodes = 150,
-		epsilon = 0.5,
-		gamma = 0.8,
-		epochs = 4,
-		learning_rate = 1e-7, 
-		clip_max_norm = 0.5,
-		nn_weight_clamp = 1e3,
-	),
-	Config (
-		name = "PPO_3",
-		action_std_init = 0.7,
-		action_std_min = 0.1,
-		warmup_episodes = 100,
-		decay_episodes = 150,
-		epsilon = 0.3,
-		gamma = 0.8,
-		epochs = 4,
-		learning_rate = 1e-7, 
-		clip_max_norm = 0.5,
-		nn_weight_clamp = 1e3,
-	),
-	
-	
 ]
 
 if __name__ == "__main__":
@@ -168,11 +159,14 @@ if __name__ == "__main__":
 				action = torch.tanh(dist.sample()) # Sample Normal distribution
 				probability = dist.log_prob(action).sum(dim=1) # Get the logarithm of the probability that action is taken given the distribution
 				# We need the probability of the action so we can computer policy loss later, and clip it using PPO.
+				
+				# Change of variables to cast probability to tanh distribution
+				probability -= torch.log(1 - action.pow(2) + 1e-6).sum(dim=1)
 
 				# Convert action tensor into numpy array for Gymnasium
 				steering = torch.clamp(action[..., 0], min=-1.0, max=1.0)
-				gas = torch.clamp(action[..., 1], min=0.0)
-				brake = torch.clamp(action[..., 2], min=0.0)
+				gas = torch.clamp(action[..., 1], min=0.0, max=1.0)
+				brake = torch.clamp(action[..., 2], min=0.0, max=1.0)
 
 				action_choice = torch.stack([steering, gas, brake], dim=-1)
 				action_choice = action_choice.squeeze(0).cpu().numpy()
@@ -180,6 +174,8 @@ if __name__ == "__main__":
 				# Get new observation and reward after taking action, find out if terminated
 
 				obs, reward, terminated, truncated, _ = params.env.step(action_choice)
+				# if reward > 0: reward *= 2
+
 				done = terminated or truncated
 
 				# Store data for optimization
@@ -209,6 +205,9 @@ if __name__ == "__main__":
 			# Get advantage by getting the difference between the reward we got and the value of the state
 			advantages = returns - values_tensor
 
+			# Normalize Advantages
+			advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
 			# Combine the states by stacking them into one new tensor, along the 0th dimension
 			states_tensor = torch.stack(data["states"], 0)
 			action_tensor = torch.stack(data["actions"], 0)
@@ -219,7 +218,7 @@ if __name__ == "__main__":
 				dist = Normal(new_means, params.action_std) # Create a Normal distribition using mean from mean of concatenated tensors
 
 				log_probs = dist.log_prob(action_tensor).sum(dim=1)
-
+				
 				# Let's get a representation of the change in policy, from old to new
 				ratio = (log_probs - old_prob_tensor).exp()
 
@@ -252,7 +251,12 @@ if __name__ == "__main__":
 
 			if (episode > params.warmup_episodes):
 				decay_ratio = (episode - params.warmup_episodes) / params.decay_episodes
-				params.action_std = max(params.action_std_min, params.action_std_init - decay_ratio * (params.action_std_init - params.action_std_min))
+				params.action_std = round(
+					max(
+						params.action_std_min, 
+						params.action_std_init - decay_ratio * (params.action_std_init - params.action_std_min
+					)), 4
+				)
 
 			log_data[log_index]['reward'] = episode_reward
 			log_data[log_index]['v_loss'] = value_loss.item()
